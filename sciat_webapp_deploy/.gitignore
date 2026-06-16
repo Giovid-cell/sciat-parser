@@ -1,0 +1,16 @@
+# MAI caricare dati dei partecipanti su un repo pubblico
+*.csv
+*.xlsx
+*.xls
+*.sav
+*.dta
+data/
+*_RAW*
+*_parsed*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
