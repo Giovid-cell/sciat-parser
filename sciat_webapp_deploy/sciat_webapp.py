@@ -1,18 +1,12 @@
 """
-SC-IAT Parser — Web App (Streamlit)
-====================================
-Interfaccia web sopra il parser `sciat_minnojs_parser.py`.
+SC-IAT Parser - Web App (Streamlit)
+===================================
+Converte un export grezzo Qualtrics/MinnoJS di uno SC-IAT in un file Excel con
+tre fogli (Trial_Level, Quality_Report, Summary_Stats), per qualsiasi SC-IAT con
+questa struttura.
 
-Trasforma un export grezzo Qualtrics/MinnoJS in un singolo file .xlsx con tre
-fogli (Trial_Level, Quality_Report, Summary_Stats), per QUALSIASI SC-IAT con
-quella struttura — non solo lo studio sull'aiuto.
-
-L'utente:
-  1. carica il CSV grezzo;
-  2. sceglie la colonna che contiene i dati SC-IAT e la colonna ID;
-  3. etichetta i blocchi rilevati come "congruente" / "incongruente"
-     (il suggerimento è precompilato con la logica originale dello studio);
-  4. scarica l'Excel.
+Lo scoring del D-score e' interamente configurabile dalla barra laterale: ogni
+ricercatore puo' scegliere la variante dell'algoritmo che preferisce.
 
 Avvio:
     streamlit run sciat_webapp.py
@@ -28,35 +22,30 @@ import pandas as pd
 import streamlit as st
 
 from sciat_minnojs_parser import SCIATParser
+from sciat_scoring import ScoringConfig, score
 
 
 # --------------------------------------------------------------------------- #
-#  Parser configurabile: le condizioni congruente/incongruente non sono più    #
-#  cablate in italiano, ma decise da una mappa fornita dall'utente.            #
+#  Parser con condizioni configurabili (congruente/incongruente per qualsiasi  #
+#  stimolo, non solo lo studio sull'aiuto).                                     #
 # --------------------------------------------------------------------------- #
 def _norm(text) -> str:
-    """Normalizza un block text rimuovendo tutti gli spazi (chiave della mappa)."""
     if pd.isna(text):
         return ""
     return re.sub(r"\s+", "", str(text))
 
 
 class ConfigurableSCIATParser(SCIATParser):
-    """Come SCIATParser, ma con mappa blocco->condizione iniettabile dall'esterno."""
-
     def __init__(self, *args, condition_map: dict | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.condition_map = condition_map or {}
 
     def _assign_condition(self, block_text) -> str:
-        # Se l'utente ha definito una mappa, ha la precedenza assoluta.
         if self.condition_map:
             return self.condition_map.get(_norm(block_text), "unknown")
-        # Altrimenti si comporta come l'originale (compatibilità studio "aiuto").
         return super()._assign_condition(block_text)
 
     def default_guess(self, block_text) -> str:
-        """Suggerimento basato sulla logica italiana originale (per pre-compilare la UI)."""
         return SCIATParser._assign_condition(self, block_text)
 
 
@@ -64,7 +53,6 @@ class ConfigurableSCIATParser(SCIATParser):
 #  Utility                                                                      #
 # --------------------------------------------------------------------------- #
 def write_temp(uploaded) -> str:
-    """Salva il file caricato in un temporaneo e restituisce il path."""
     suffix = Path(uploaded.name).suffix or ".csv"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     tmp.write(uploaded.getvalue())
@@ -73,8 +61,7 @@ def write_temp(uploaded) -> str:
     return tmp.name
 
 
-def read_columns(path: str, skip_rows: int) -> list[str]:
-    """Legge solo le intestazioni per popolare i menu a tendina."""
+def read_columns(path: str, skip_rows: int):
     skip = [1, 2] if skip_rows == 2 else list(range(1, skip_rows + 1))
     df = pd.read_csv(
         path, dtype=str, encoding="utf-8-sig", sep=None, engine="python",
@@ -84,8 +71,7 @@ def read_columns(path: str, skip_rows: int) -> list[str]:
     return list(df.columns), df
 
 
-def guess_iat_column(df: pd.DataFrame) -> str | None:
-    """Indovina la colonna SC-IAT: la prima i cui valori contengono 'block'."""
+def guess_iat_column(df: pd.DataFrame):
     for c in df.columns:
         if df[c].astype(str).str.contains("block", na=False, case=False).any():
             return c
@@ -93,7 +79,6 @@ def guess_iat_column(df: pd.DataFrame) -> str | None:
 
 
 def distinct_block_texts(parser) -> list[str]:
-    """Estrae le stringhe di blocco distinte dei blocchi di prova/critici (1-4)."""
     td = parser.trial_data
     block_col = "block" if "block" in td.columns else "Block"
     cond_col = "cond" if "cond" in td.columns else "BlockText"
@@ -111,37 +96,114 @@ def distinct_block_texts(parser) -> list[str]:
     return out
 
 
-def build_excel(parser) -> bytes:
-    """Costruisce il workbook a 3 fogli in memoria e restituisce i byte."""
+def build_excel(trials, quality, summary) -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        parser.trial_data.to_excel(w, sheet_name="Trial_Level", index=False)
-        parser.quality_report.to_excel(w, sheet_name="Quality_Report", index=False)
-        parser.summary_data.to_excel(w, sheet_name="Summary_Stats", index=False)
+        trials.to_excel(w, sheet_name="Trial_Level", index=False)
+        quality.to_excel(w, sheet_name="Quality_Report", index=False)
+        summary.to_excel(w, sheet_name="Summary_Stats", index=False)
     buf.seek(0)
     return buf.getvalue()
 
 
 # --------------------------------------------------------------------------- #
-#  UI                                                                           #
+#  Barra laterale: opzioni di scoring                                           #
 # --------------------------------------------------------------------------- #
-st.set_page_config(page_title="SC-IAT Parser", page_icon="🧠", layout="wide")
-st.title("🧠 SC-IAT Parser — da dato grezzo a Excel")
-st.caption(
-    "Carica un export Qualtrics/MinnoJS e ottieni un file .xlsx con tre fogli: "
+def scoring_sidebar() -> ScoringConfig:
+    st.sidebar.header("Opzioni di scoring")
+    st.sidebar.caption(
+        "Imposta la variante dell'algoritmo. I valori predefiniti seguono "
+        "Karpinski & Steinman (2006)."
+    )
+
+    st.sidebar.subheader("Filtri sui tempi di risposta")
+    st.sidebar.caption("I trial fuori soglia non vengono eliminati: diventano NA.")
+    remove_fast = st.sidebar.checkbox("Escludi risposte troppo rapide", value=True)
+    fast_threshold = st.sidebar.number_input(
+        "Soglia inferiore (ms)", value=350, step=10, disabled=not remove_fast,
+    )
+    remove_slow = st.sidebar.checkbox("Escludi risposte troppo lente", value=True)
+    slow_threshold = st.sidebar.number_input(
+        "Soglia superiore (ms)", value=1500, step=50, disabled=not remove_slow,
+    )
+
+    st.sidebar.subheader("Trattamento degli errori")
+    error_mode_label = st.sidebar.radio(
+        "Nelle medie di condizione",
+        ["Penalita': media di blocco + ms", "Escludi i trial errati"],
+    )
+    error_mode = "penalty" if error_mode_label.startswith("Penalita") else "exclude"
+    penalty_ms = st.sidebar.number_input(
+        "Penalita' (ms)", value=400, step=50, disabled=error_mode != "penalty",
+    )
+
+    st.sidebar.subheader("Calcolo del D-score")
+    sd_labels = {
+        "SD di tutti i trial corretti (K&S 2006)": "all_correct",
+        "SD pooled delle due condizioni": "pooled",
+        "SD su tutti i trial, errori penalizzati inclusi": "all_with_penalty",
+    }
+    sd_choice = st.sidebar.selectbox("Denominatore (SD)", list(sd_labels.keys()))
+    sd_method = sd_labels[sd_choice]
+
+    sign_labels = {
+        "(M incongruente - M congruente) / SD": "incong_minus_cong",
+        "(M congruente - M incongruente) / SD": "cong_minus_incong",
+    }
+    sign_choice = st.sidebar.radio("Direzione del D", list(sign_labels.keys()))
+    d_sign = sign_labels[sign_choice]
+
+    st.sidebar.subheader("Esclusione partecipanti")
+    st.sidebar.caption("I partecipanti esclusi vengono segnalati, non rimossi.")
+    use_err = st.sidebar.checkbox("Esclusione per tasso di errore", value=True)
+    err_pct = st.sidebar.number_input(
+        "Soglia errori (%)", value=10.0, min_value=0.0, max_value=100.0, step=1.0,
+        disabled=not use_err,
+    )
+    use_to = st.sidebar.checkbox("Esclusione per tasso di timeout", value=True)
+    to_pct = st.sidebar.number_input(
+        "Soglia timeout (%)", value=8.33, min_value=0.0, max_value=100.0, step=1.0,
+        disabled=not use_to,
+    )
+    min_valid = st.sidebar.number_input("Minimo trial validi", value=29, step=1)
+    drop_excluded = st.sidebar.checkbox(
+        "Rimuovi davvero i partecipanti esclusi", value=False,
+        help="Se disattivo, restano nell'output con il flag EXCLUDE (merge piu' semplice).",
+    )
+
+    return ScoringConfig(
+        remove_fast=remove_fast, fast_threshold=float(fast_threshold),
+        remove_slow=remove_slow, slow_threshold=float(slow_threshold),
+        error_mode=error_mode, penalty_ms=float(penalty_ms),
+        sd_method=sd_method, d_sign=d_sign,
+        use_error_rate_exclusion=use_err, error_rate_threshold=err_pct / 100.0,
+        use_timeout_exclusion=use_to, max_timeout_rate=to_pct / 100.0,
+        min_valid_trials=int(min_valid), drop_excluded=drop_excluded,
+    )
+
+
+# --------------------------------------------------------------------------- #
+#  Interfaccia principale                                                       #
+# --------------------------------------------------------------------------- #
+st.set_page_config(page_title="SC-IAT Parser", layout="wide")
+st.title("SC-IAT Parser")
+st.write(
+    "Converte un export grezzo Qualtrics/MinnoJS in un file Excel con tre fogli: "
     "**Trial_Level**, **Quality_Report**, **Summary_Stats**. "
-    "Funziona con qualsiasi SC-IAT con questa struttura."
+    "Compatibile con qualsiasi SC-IAT che abbia questa struttura."
 )
 
-uploaded = st.file_uploader("📂 File grezzo (.csv)", type=["csv"])
+cfg = scoring_sidebar()
 
+uploaded = st.file_uploader("File grezzo (.csv)", type=["csv"])
 if uploaded is None:
     st.info("Carica un file CSV per iniziare.")
     st.stop()
 
 path = write_temp(uploaded)
 
-st.subheader("1 · Impostazioni colonne")
+st.divider()
+st.subheader("1 - Impostazioni colonne")
 c1, c2, c3 = st.columns(3)
 with c3:
     skip_rows = st.number_input(
@@ -158,20 +220,17 @@ except Exception as e:
 iat_guess = guess_iat_column(head_df)
 with c1:
     iat_column = st.selectbox(
-        "Colonna con i dati SC-IAT",
-        options=columns,
+        "Colonna con i dati SC-IAT", options=columns,
         index=columns.index(iat_guess) if iat_guess in columns else 0,
         help="La colonna che contiene il CSV annidato dell'esperimento (contiene 'block').",
     )
 with c2:
     id_default = "ResponseId" if "ResponseId" in columns else columns[0]
     id_column = st.selectbox(
-        "Colonna ID partecipante",
-        options=columns,
-        index=columns.index(id_default),
+        "Colonna ID partecipante", options=columns, index=columns.index(id_default),
     )
 
-if st.button("🔍 Carica e rileva i blocchi", type="primary"):
+if st.button("Carica e rileva i blocchi", type="primary"):
     log = io.StringIO()
     try:
         with contextlib.redirect_stdout(log):
@@ -181,7 +240,7 @@ if st.button("🔍 Carica e rileva i blocchi", type="primary"):
             parser.load_data().parse_all_participants()
         st.session_state["parser"] = parser
         st.session_state["blocks"] = distinct_block_texts(parser)
-        st.session_state.pop("xlsx", None)
+        st.session_state.pop("result", None)
     except Exception as e:
         st.error(f"Errore durante il caricamento: {e}")
     with st.expander("Log di caricamento"):
@@ -192,10 +251,11 @@ if "parser" in st.session_state and "blocks" in st.session_state:
     parser = st.session_state["parser"]
     blocks = st.session_state["blocks"]
 
-    st.subheader("2 · Etichetta i blocchi")
+    st.divider()
+    st.subheader("2 - Etichetta i blocchi")
     st.caption(
-        "Per ogni configurazione di blocco rilevata, indica se è **congruente** o "
-        "**incongruente**. Il suggerimento è precompilato; correggilo per il tuo SC-IAT."
+        "Per ogni configurazione di blocco rilevata indica se e' congruente o "
+        "incongruente. Il suggerimento e' precompilato."
     )
 
     options = ["congruent", "incongruent", "ignora"]
@@ -203,7 +263,7 @@ if "parser" in st.session_state and "blocks" in st.session_state:
     condition_map: dict[str, str] = {}
 
     if not blocks:
-        st.warning("Nessuna configurazione di blocco rilevata (blocchi 1-4). Controlla le colonne scelte.")
+        st.warning("Nessuna configurazione di blocco rilevata. Controlla le colonne scelte.")
     for i, bt in enumerate(blocks):
         guess = parser.default_guess(bt)
         default_idx = options.index(guess) if guess in ("congruent", "incongruent") else 0
@@ -221,43 +281,53 @@ if "parser" in st.session_state and "blocks" in st.session_state:
 
     out_name = f"{Path(uploaded.name).stem}_parsed.xlsx"
 
-    if st.button("⚙️ Genera Excel", type="primary"):
+    st.divider()
+    st.subheader("3 - Genera l'output")
+    st.caption("Le opzioni di scoring sono nella barra laterale a sinistra.")
+    if st.button("Genera Excel", type="primary"):
         log = io.StringIO()
         try:
             with contextlib.redirect_stdout(log):
                 parser.condition_map = condition_map
                 parser.process_trials()
-                parser.compute_quality_metrics()
-                parser.compute_summary_statistics()
-                xlsx = build_excel(parser)
-            st.session_state["xlsx"] = xlsx
-            st.session_state["xlsx_name"] = out_name
-            st.success("Excel generato ✔")
+                trials, summary, quality = score(parser.trial_data, cfg)
+                xlsx = build_excel(trials, quality, summary)
+            st.session_state["result"] = {
+                "trials": trials, "summary": summary, "quality": quality,
+                "xlsx": xlsx, "name": out_name,
+            }
+            st.success("Output generato.")
         except Exception as e:
             st.error(f"Errore in elaborazione: {e}")
         with st.expander("Log di elaborazione"):
             st.code(log.getvalue() or "(nessun output)")
 
 # ---- Anteprima + download ------------------------------------------------- #
-if "xlsx" in st.session_state:
-    parser = st.session_state["parser"]
-    st.subheader("3 · Anteprima e download")
+if "result" in st.session_state:
+    res = st.session_state["result"]
+    st.divider()
+    st.subheader("4 - Risultati")
+
+    d = res["summary"]["D_Score"].dropna()
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Partecipanti", res["summary"]["ParticipantID"].nunique())
+    m2.metric("D-score medio", f"{d.mean():.3f}" if len(d) else "n/d")
+    m3.metric("Da escludere", int(res["quality"]["EXCLUDE"].sum()))
+    m4.metric("Trial totali", len(res["trials"]))
 
     st.download_button(
-        "⬇️ Scarica .xlsx",
-        data=st.session_state["xlsx"],
-        file_name=st.session_state.get("xlsx_name", "SCIAT_parsed.xlsx"),
+        "Scarica .xlsx", data=res["xlsx"], file_name=res["name"],
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",
     )
 
     t1, t2, t3 = st.tabs(["Trial_Level", "Quality_Report", "Summary_Stats"])
     with t1:
-        st.caption(f"{len(parser.trial_data)} righe")
-        st.dataframe(parser.trial_data.head(200), use_container_width=True)
+        st.caption(f"{len(res['trials'])} righe")
+        st.dataframe(res["trials"].head(300), use_container_width=True)
     with t2:
-        st.caption(f"{len(parser.quality_report)} partecipanti")
-        st.dataframe(parser.quality_report, use_container_width=True)
+        st.caption(f"{len(res['quality'])} partecipanti")
+        st.dataframe(res["quality"], use_container_width=True)
     with t3:
-        st.caption(f"{len(parser.summary_data)} partecipanti")
-        st.dataframe(parser.summary_data, use_container_width=True)
+        st.caption(f"{len(res['summary'])} partecipanti")
+        st.dataframe(res["summary"], use_container_width=True)
