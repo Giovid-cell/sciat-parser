@@ -13,6 +13,7 @@ Avvio:
 """
 
 import io
+import os
 import re
 import tempfile
 import contextlib
@@ -23,6 +24,12 @@ import streamlit as st
 
 from sciat_minnojs_parser import SCIATParser
 from sciat_scoring import ScoringConfig, score
+
+try:
+    import pyreadstat
+    HAS_SAV = True
+except Exception:
+    HAS_SAV = False
 
 
 # --------------------------------------------------------------------------- #
@@ -96,14 +103,49 @@ def distinct_block_texts(parser) -> list[str]:
     return out
 
 
-def build_excel(trials, quality, summary) -> bytes:
+def workbook_xlsx(sheets: dict) -> bytes:
+    """Workbook .xlsx con piu' fogli (dict nome -> DataFrame)."""
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        trials.to_excel(w, sheet_name="Trial_Level", index=False)
-        quality.to_excel(w, sheet_name="Quality_Report", index=False)
-        summary.to_excel(w, sheet_name="Summary_Stats", index=False)
+        for name, df in sheets.items():
+            df.to_excel(w, sheet_name=name, index=False)
     buf.seek(0)
     return buf.getvalue()
+
+
+def sheet_xlsx(df: pd.DataFrame, name: str) -> bytes:
+    """Workbook .xlsx con un solo foglio."""
+    return workbook_xlsx({name: df})
+
+
+def _sanitize_varname(name: str) -> str:
+    """Nome variabile valido per SPSS (lettere/numeri/underscore, max 64)."""
+    n = re.sub(r"[^0-9a-zA-Z_]", "_", str(name))
+    if not n or not n[0].isalpha():
+        n = "v_" + n
+    return n[:64]
+
+
+def sheet_sav(df: pd.DataFrame) -> bytes | None:
+    """Esporta un DataFrame in formato SPSS .sav (None se pyreadstat manca)."""
+    if not HAS_SAV:
+        return None
+    d = df.copy()
+    for c in d.columns:
+        if d[c].dtype == bool:
+            d[c] = d[c].astype(int)
+        elif d[c].dtype == object:
+            d[c] = d[c].fillna("").astype(str)
+    d.columns = [_sanitize_varname(c) for c in d.columns]
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".sav")
+    tmp.close()
+    try:
+        pyreadstat.write_sav(d, tmp.name)
+        with open(tmp.name, "rb") as f:
+            data = f.read()
+    finally:
+        os.unlink(tmp.name)
+    return data
 
 
 # --------------------------------------------------------------------------- #
@@ -114,6 +156,13 @@ def scoring_sidebar() -> ScoringConfig:
     st.sidebar.caption(
         "Imposta la variante dell'algoritmo. I valori predefiniti seguono "
         "Karpinski & Steinman (2006)."
+    )
+
+    st.sidebar.subheader("Blocchi inclusi nelle analisi")
+    include_practice = st.sidebar.checkbox(
+        "Includi i blocchi di pratica", value=False,
+        help="Se disattivo, tutte le stime (D, tassi, esclusioni) usano solo i "
+             "blocchi critici. Se attivo, includono anche i blocchi di pratica.",
     )
 
     st.sidebar.subheader("Filtri sui tempi di risposta")
@@ -172,6 +221,7 @@ def scoring_sidebar() -> ScoringConfig:
     )
 
     return ScoringConfig(
+        include_practice=include_practice,
         remove_fast=remove_fast, fast_threshold=float(fast_threshold),
         remove_slow=remove_slow, slow_threshold=float(slow_threshold),
         error_mode=error_mode, penalty_ms=float(penalty_ms),
@@ -284,17 +334,27 @@ if "parser" in st.session_state and "blocks" in st.session_state:
     st.divider()
     st.subheader("3 - Genera l'output")
     st.caption("Le opzioni di scoring sono nella barra laterale a sinistra.")
-    if st.button("Genera Excel", type="primary"):
+    if st.button("Genera output", type="primary"):
         log = io.StringIO()
         try:
             with contextlib.redirect_stdout(log):
                 parser.condition_map = condition_map
                 parser.process_trials()
                 trials, summary, quality = score(parser.trial_data, cfg)
-                xlsx = build_excel(trials, quality, summary)
+                sheets = {
+                    "Trial_Level": trials,
+                    "Quality_Report": quality,
+                    "Summary_Stats": summary,
+                }
+                combined = workbook_xlsx(sheets)
+                per_sheet = {
+                    name: {"xlsx": sheet_xlsx(df, name), "sav": sheet_sav(df)}
+                    for name, df in sheets.items()
+                }
             st.session_state["result"] = {
                 "trials": trials, "summary": summary, "quality": quality,
-                "xlsx": xlsx, "name": out_name,
+                "combined": combined, "per_sheet": per_sheet,
+                "stem": Path(uploaded.name).stem,
             }
             st.success("Output generato.")
         except Exception as e:
@@ -303,6 +363,29 @@ if "parser" in st.session_state and "blocks" in st.session_state:
             st.code(log.getvalue() or "(nessun output)")
 
 # ---- Anteprima + download ------------------------------------------------- #
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def sheet_download_buttons(res, sheet_name):
+    """Due bottoni (xlsx, sav) per un singolo foglio."""
+    files = res["per_sheet"][sheet_name]
+    stem = res["stem"]
+    b1, b2 = st.columns(2)
+    b1.download_button(
+        "Scarica foglio (.xlsx)", data=files["xlsx"],
+        file_name=f"{stem}_{sheet_name}.xlsx", mime=XLSX_MIME,
+        key=f"dl_xlsx_{sheet_name}",
+    )
+    if files["sav"] is not None:
+        b2.download_button(
+            "Scarica foglio (.sav)", data=files["sav"],
+            file_name=f"{stem}_{sheet_name}.sav", mime="application/octet-stream",
+            key=f"dl_sav_{sheet_name}",
+        )
+    else:
+        b2.button("SPSS .sav non disponibile", disabled=True, key=f"nosav_{sheet_name}")
+
+
 if "result" in st.session_state:
     res = st.session_state["result"]
     st.divider()
@@ -316,18 +399,22 @@ if "result" in st.session_state:
     m4.metric("Trial totali", len(res["trials"]))
 
     st.download_button(
-        "Scarica .xlsx", data=res["xlsx"], file_name=res["name"],
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
+        "Scarica tutto (.xlsx, 3 fogli)", data=res["combined"],
+        file_name=f"{res['stem']}_parsed.xlsx", mime=XLSX_MIME, type="primary",
     )
+    if not HAS_SAV:
+        st.caption("Nota: l'export .sav richiede il pacchetto pyreadstat (assente).")
 
     t1, t2, t3 = st.tabs(["Trial_Level", "Quality_Report", "Summary_Stats"])
     with t1:
         st.caption(f"{len(res['trials'])} righe")
+        sheet_download_buttons(res, "Trial_Level")
         st.dataframe(res["trials"].head(300), use_container_width=True)
     with t2:
         st.caption(f"{len(res['quality'])} partecipanti")
+        sheet_download_buttons(res, "Quality_Report")
         st.dataframe(res["quality"], use_container_width=True)
     with t3:
         st.caption(f"{len(res['summary'])} partecipanti")
+        sheet_download_buttons(res, "Summary_Stats")
         st.dataframe(res["summary"], use_container_width=True)

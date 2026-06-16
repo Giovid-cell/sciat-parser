@@ -28,6 +28,17 @@ Karpinski & Steinman (2006). I trial filtrati non vengono eliminati ma messi a
 - Direzione del D: `(M incongruente − M congruente)/SD` o invertita.
 - Esclusione partecipanti: per tasso di errore (default 10%), timeout, trial validi
   minimi; i partecipanti esclusi sono segnalati (flag `EXCLUDE`), non rimossi.
+- Blocchi inclusi: solo critici (default) oppure critici + pratica. La scelta vale
+  per tutte le stime (D, tassi, esclusioni).
+
+Il Quality_Report riporta conteggi (errori, timeout, anticipazioni) e i relativi
+tassi in percentuale.
+
+## Download
+
+Si possono scaricare:
+- il workbook `.xlsx` completo (tre fogli);
+- ogni singolo foglio in `.xlsx` o in `.sav` (SPSS).
 
 ## Eseguire in locale (per sviluppatori)
 
