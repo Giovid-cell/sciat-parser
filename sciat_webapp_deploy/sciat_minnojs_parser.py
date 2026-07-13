@@ -354,7 +354,29 @@ class SCIATParser:
         # Mark practice vs critical trials
         df['IsCritical'] = df['Block'].isin(self.critical_blocks)
         df['IsPractice'] = df['Block'].isin(self.practice_blocks)
-        
+
+        # Explicit key pressed: MinnoJS stores side (left/right); map to physical
+        # keys W (left categories) / P (right category). space/timeout pass through.
+        if 'Response' in df.columns:
+            df['Key_Pressed'] = df['Response'].map(
+                {'left': 'W', 'right': 'P'}
+            ).fillna(df['Response'])
+
+        # Per-block trial counter (1..N), restarting each block per participant.
+        # Counts only real categorization trials (TrialType == 'sort'); the
+        # instruction row and the end row stay NaN.
+        if 'TrialType' in df.columns:
+            sort_mask = df['TrialType'] == 'sort'
+            df['Trial_In_Block'] = pd.NA
+            df.loc[sort_mask, 'Trial_In_Block'] = (
+                df[sort_mask]
+                .sort_values(['ParticipantID', 'Block', 'Trial'])
+                .groupby(['ParticipantID', 'Block'])
+                .cumcount()
+                + 1
+            )
+            df['Trial_In_Block'] = df['Trial_In_Block'].astype('Int64')
+
         # Calculate block order per participant (which condition came first)
         block_order = (
             df[df['Condition'].isin(['congruent', 'incongruent'])]

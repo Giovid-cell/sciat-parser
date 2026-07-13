@@ -257,8 +257,9 @@ def compute_quality(df: pd.DataFrame, cfg: ScoringConfig) -> pd.DataFrame:
 
 # Colonne tenute nel Trial_Level (le altre, morte o ridondanti, vengono tolte).
 TRIAL_KEEP = [
-    "ParticipantID", "Block", "Trial", "Condition", "IsCritical", "IsPractice",
-    "Category", "TrialType", "Error", "RT", "RT_clean", "RT_scored",
+    "ParticipantID", "Block", "Trial", "Trial_In_Block", "Condition",
+    "IsCritical", "IsPractice", "Category", "Stimulus", "TrialType",
+    "Response", "Key_Pressed", "Error", "RT", "RT_clean", "RT_scored",
     "Trial_Excluded", "Exclusion_Reason",
 ]
 
